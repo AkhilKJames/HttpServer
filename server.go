@@ -1,14 +1,34 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
+type HTTPRequest struct {
+	method      string
+	target      string
+	httpVersion string
+	headers     map[string]string
+	body        []byte
+}
+
+type HTTPResponse struct {
+	statusCode  int16
+	status      string
+	httpVersion string
+	headers     map[string]string
+	body        string
+}
+
 func main() {
-	fmt.Println("Logs !!!")
+	// You can use print statements as follows for debugging, they'll be visible when running tests.
+	fmt.Println("Logs from your program will appear here!")
 
 	// Creates a port listener
 	l, err := net.Listen("tcp", "127.0.0.1:4221")
@@ -30,71 +50,169 @@ func main() {
 }
 
 func handleConnections(conn net.Conn) {
-	// read the request data
-	req := make([]byte, 1024)
-	_, err := conn.Read(req)
+	// fmt.Println("------------------------------ New Connection ")
+	// fmt.Println("Connected: ", conn.RemoteAddr())
+	request, err := parseRequest(conn)
 	if err != nil {
-		fmt.Println("Error Reading request: ", err.Error())
-		conn.Close()
-		return
+		fmt.Println("Failed to parse request: " + err.Error())
 	}
 
-	//
-	reqSplit := strings.Split(string(req), "\r\n")
-	// for i := 0; i < len(reqSplit); i++ {
-	// 	fmt.Printf("\n %d : %s", i, reqSplit[i])
-	// }
-	data := strings.Split(reqSplit[0], " ")
-	reqMethod := data[0]
-	path := data[1]
+	// fmt.Println("--------------------")
+	fmt.Println(request)
 
-	resp := "HTTP/1.1 404 Unkown Method\r\n\r\n"
-	fmt.Printf("\nRecieved a %s request on Path %s", reqMethod, path)
-	if reqMethod == "GET" {
-		resp = get(reqSplit, path)
-	} else if reqMethod == "POST" {
-		resp = post(reqSplit, path)
+	resp := HTTPResponse{}
+	if request.method == "GET" {
+		resp = get(request, request.target)
+	} else if request.method == "POST" {
+		resp = post(request, request.target)
+	} else {
+		resp.statusCode = 404
+		resp.httpVersion = request.httpVersion
+		resp.status = "Not Found"
 	}
-	conn.Write([]byte(resp))
+	conn.Write([]byte(responseWriter(resp)))
 	conn.Close()
-
 }
 
-func get(reqSplit []string, path string) string {
+func parseRequest(connection net.Conn) (HTTPRequest, error) {
+	lines := make(chan []byte)
+	go byteReader(lines, connection)
+	requestLineValues := bytes.Split(<-lines, []byte(" "))
+	if len(requestLineValues) != 3 {
+		return HTTPRequest{}, fmt.Errorf("invalid request line")
+	}
+	method := string(requestLineValues[0])
+	target := string(requestLineValues[1])
+	httpVersion := string(requestLineValues[2])
+	headers := make(map[string]string)
+	for {
+		headerLine := <-lines
+		if len(headerLine) == 0 {
+			break
+		}
+		headerLineValues := bytes.Split(headerLine, []byte(": "))
+		headers[string(headerLineValues[0])] = string(headerLineValues[1])
+	}
+	body := <-lines
+	return HTTPRequest{
+		method:      method,
+		target:      target,
+		httpVersion: httpVersion,
+		headers:     headers,
+		body:        body,
+	}, nil
+}
+
+func byteReader(channel chan []byte, connection net.Conn) error {
+	buffer := make([]byte, 0)
+	for {
+		tmp := make([]byte, 1024)
+		n, err := connection.Read(tmp)
+		if err != nil && err != io.EOF {
+			close(channel)
+			return err
+		}
+		buffer = append(buffer, tmp[:n]...)
+		splitBuffer := bytes.Split(buffer, []byte("\r\n"))
+		for _, line := range splitBuffer[:len(splitBuffer)-1] {
+			channel <- line
+		}
+		buffer = splitBuffer[len(splitBuffer)-1]
+		if n <= len(tmp) || err == io.EOF {
+			break
+		}
+	}
+	channel <- buffer
+	close(channel)
+	return nil
+}
+
+func get(req HTTPRequest, path string) HTTPResponse {
 	if path == "/" {
-		return "HTTP/1.1 200 OK\r\n\r\n"
+		return HTTPResponse{
+			statusCode:  200,
+			status:      "OK",
+			httpVersion: req.httpVersion,
+		}
 	} else if strings.HasPrefix(path, "/echo/") {
 		breakdown := strings.Split(string(path), "/")
-		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(breakdown[2]), breakdown[2])
+		return HTTPResponse{
+			statusCode:  200,
+			status:      "OK",
+			httpVersion: req.httpVersion,
+			headers:     map[string]string{"Content-Type": req.headers["Content-Type"], "Content-Length": strconv.Itoa(len(breakdown[2]))},
+			body:        breakdown[2],
+		}
 	} else if strings.HasPrefix(string(path), "/user-agent") {
-		userAgent := strings.Split(string(reqSplit[2]), " ")
-		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent[1]), userAgent[1])
+		userAgent := req.headers["User-Agent"]
+		return HTTPResponse{
+			statusCode:  200,
+			status:      "OK",
+			httpVersion: req.httpVersion,
+			headers:     map[string]string{"Content-Type": req.headers["Content-Type"], "Content-Length": strconv.Itoa(len(userAgent))},
+			body:        userAgent,
+		}
 	} else if strings.HasPrefix(string(path), "/files/") {
 		dir := os.Args[2]
 		breakdown := strings.Split(string(path), "/")
 		content, err := os.ReadFile(dir + breakdown[2])
 		if err != nil {
 			fmt.Println(err.Error())
-			return "HTTP/1.1 404 Not Found\r\n\r\n"
+			return HTTPResponse{
+				statusCode:  404,
+				status:      "Not Found",
+				httpVersion: req.httpVersion,
+			}
 		}
-		// fmt.Println(content)
-		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(content), content)
+		return HTTPResponse{
+			statusCode:  200,
+			status:      "OK",
+			httpVersion: req.httpVersion,
+			headers:     map[string]string{"Content-Type": req.headers["Content-Type"], "Content-Length": strconv.Itoa(len(content))},
+			body:        string(content),
+		}
 	}
-	return "HTTP/1.1 404 Not Found\r\n\r\n"
+	return HTTPResponse{
+		statusCode:  404,
+		status:      "Not Found",
+		httpVersion: req.httpVersion,
+	}
 }
 
-func post(reqSplit []string, path string) string {
+func post(req HTTPRequest, path string) HTTPResponse {
 	if strings.HasPrefix(string(path), "/files/") {
 		dir := os.Args[2]
 		breakdown := strings.Split(string(path), "/")
-		file := []byte(strings.Trim(reqSplit[len(reqSplit)-1], "\x00"))
-		err := os.WriteFile(dir+breakdown[2], file, os.ModePerm)
+		err := os.WriteFile(dir+breakdown[2], req.body, os.ModePerm)
 		if err != nil {
 			fmt.Println(err.Error())
-			return "HTTP/1.1 404 Write failed\r\n\r\n"
+			return HTTPResponse{
+				statusCode:  404,
+				status:      "Write Failed",
+				httpVersion: req.httpVersion,
+			}
 		}
-		// fmt.Println(content)
-		return "HTTP/1.1 201 Created\r\n\r\n"
+		return HTTPResponse{
+			statusCode:  201,
+			status:      "Created",
+			httpVersion: req.httpVersion,
+		}
 	}
-	return "HTTP/1.1 404 Not Found\r\n\r\n"
+	return HTTPResponse{
+		statusCode:  404,
+		status:      "Not Found",
+		httpVersion: req.httpVersion,
+	}
+}
+
+func responseWriter(resp HTTPResponse) string {
+	res := fmt.Sprintf("%s %d %s\r\n", resp.httpVersion, resp.statusCode, resp.status)
+	if resp.body != "" {
+		var header string
+		for key, val := range resp.headers {
+			header += fmt.Sprintf("%s: %s\r\n", key, val)
+		}
+		res = res + header + fmt.Sprintf("\r\n%s", string(resp.body))
+	}
+	return res
 }
