@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type HTTPRequest struct {
@@ -36,29 +38,36 @@ func main() {
 		fmt.Println("Failed to bind to port 4221")
 		os.Exit(1)
 	}
+	rand.Seed(time.Now().UnixNano())
+	charset := "abcdefghijklmnopqrstuvwxyz"
+	length := 6
+	ran_str := make([]byte, length)
 
 	for {
+		for i := 0; i < length; i++ {
+			ran_str[i] = charset[rand.Intn(len(charset))]
+		}
+		reqID := string(65 + rand.Intn(25))
+
 		// accepts incoming request
 		conn, err := l.Accept()
 		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
+			fmt.Printf("[%s] Error accepting connection: %s", reqID, err.Error())
 			conn.Close()
 			return
 		}
-		go handleConnections(conn)
+		go handleConnections(conn, reqID)
 	}
 }
 
-func handleConnections(conn net.Conn) {
-	// fmt.Println("------------------------------ New Connection ")
-	// fmt.Println("Connected: ", conn.RemoteAddr())
+func handleConnections(conn net.Conn, reqID string) {
+	fmt.Printf("[%s] Connection from : %s\n", reqID, conn.RemoteAddr())
 	request, err := parseRequest(conn)
 	if err != nil {
-		fmt.Println("Failed to parse request: " + err.Error())
+		fmt.Printf("[%s] Failed to parse request: %s\n", reqID, err.Error())
 	}
 
-	// fmt.Println("--------------------")
-	fmt.Println(request)
+	fmt.Printf("[%s] %s\n", reqID, request)
 
 	resp := HTTPResponse{}
 	if request.method == "GET" {
